@@ -1,196 +1,284 @@
-// server.js — M365 + Cloudflare provisioner backend
-// Deploy to Railway, Render, or any Node.js host
-
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 10000;
 
-// Allow requests from your Netlify frontend
-// Set ALLOWED_ORIGIN env var on Railway to your Netlify URL
-// e.g. https://your-app.netlify.app
-// During dev you can set it to * or http://localhost:5173
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+app.use(cors());
+app.use(express.json());
 
-app.use(cors({
-  origin: ALLOWED_ORIGIN,
-  methods: ["POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type"],
-}));
-app.use(express.json({ limit: "2mb" }));
+// ── Serve frontend ────────────────────────────────────────────────────────
+app.use(express.static(path.join(__dirname, "public")));
 
-// Health check
-app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "m365-provisioner-backend" });
-});
+// ── Helpers ───────────────────────────────────────────────────────────────
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ─── ALL PROVISION LOGIC ──────────────────────────────────────────────────────
-
-async function handleProvision(action, creds, data) {
-  switch (action) {
-
-    // ── 1. Get Microsoft OAuth token ─────────────────────────────────────────
-    case "ms_token": {
-      const res = await fetch(
-        `https://login.microsoftonline.com/${creds.tenantId}/oauth2/v2.0/token`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams({
-            client_id: creds.clientId,
-            client_secret: creds.clientSecret,
-            scope: "https://graph.microsoft.com/.default",
-            grant_type: "client_credentials",
-          }),
-        }
-      );
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.error_description || "MS authentication failed");
-      return { token: j.access_token };
+async function getToken(tenantId, clientId, clientSecret) {
+  const resp = await fetch(
+    `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope: "https://graph.microsoft.com/.default",
+      }),
     }
-
-    // ── 2. Generic Microsoft Graph call ──────────────────────────────────────
-    case "graph": {
-      const { method, path, body, headers: extraHeaders } = data;
-      const needsConsistency = path.includes("endsWith") || path.includes("$count");
-      const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${creds.token}`,
-          "Content-Type": "application/json",
-          ...(needsConsistency ? { "ConsistencyLevel": "eventual" } : {}),
-          ...(extraHeaders || {}),
-        },
-        body: body ? JSON.stringify(body) : undefined,
-      });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.error?.message || `Graph ${method} ${path} → ${res.status}`);
-      return j;
-    }
-
-    // ── 3. Cloudflare: find zone by domain name ───────────────────────────────
-    case "cf_find_zone": {
-      const res = await fetch(
-        `https://api.cloudflare.com/client/v4/zones?name=${data.domain}`,
-        {
-          headers: {
-            "X-Auth-Email": creds.cfEmail,
-            "X-Auth-Key": creds.cfApiKey,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-      const j = await res.json();
-      if (!j.success) throw new Error(j.errors?.[0]?.message || "Cloudflare API error");
-      if (!j.result || j.result.length === 0)
-        throw new Error(`No Cloudflare zone found for "${data.domain}". Make sure the domain is added to your Cloudflare account.`);
-      return { zoneId: j.result[0].id, zoneName: j.result[0].name };
-    }
-
-    // ── 4. Cloudflare: add or update a DNS record (upsert) ───────────────────
-    case "cf_add_record": {
-      const cfHeaders = {
-        "X-Auth-Email": creds.cfEmail,
-        "X-Auth-Key": creds.cfApiKey,
-        "Content-Type": "application/json",
-      };
-      const { zoneId, record } = data;
-
-      // Try to create first
-      const createRes = await fetch(
-        `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records`,
-        { method: "POST", headers: cfHeaders, body: JSON.stringify(record) }
-      );
-      const createJson = await createRes.json();
-
-      if (createJson.success) return { created: true, record: createJson.result };
-
-      const errMsg = createJson.errors?.[0]?.message || "Cloudflare DNS error";
-
-      // If already exists — find and update (PUT)
-      if (errMsg.toLowerCase().includes("already exists")) {
-        const listRes = await fetch(
-          `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records?type=${record.type}&name=${encodeURIComponent(record.name)}`,
-          { headers: cfHeaders }
-        );
-        const listJson = await listRes.json();
-        const existing = listJson.result?.[0];
-
-        if (existing) {
-          const updateRes = await fetch(
-            `https://api.cloudflare.com/client/v4/zones/${zoneId}/dns_records/${existing.id}`,
-            { method: "PUT", headers: cfHeaders, body: JSON.stringify(record) }
-          );
-          const updateJson = await updateRes.json();
-          if (updateJson.success) return { updated: true, record: updateJson.result };
-          return { skipped: true, message: updateJson.errors?.[0]?.message || "Update failed" };
-        }
-        return { skipped: true, message: "Record exists but could not be located for update" };
-      }
-
-      throw new Error(errMsg);
-    }
-
-    // ── 5. Enable DKIM — poll public DNS until CNAMEs resolve ────────────────
-    case "enable_dkim": {
-      const { domain } = data;
-
-      // Verify domain exists and is verified
-      const domainRes = await fetch(
-        `https://graph.microsoft.com/v1.0/domains/${encodeURIComponent(domain)}`,
-        { headers: { Authorization: `Bearer ${creds.token}` } }
-      );
-      const domainJson = await domainRes.json();
-      if (!domainRes.ok) throw new Error(domainJson.error?.message || "Domain not accessible");
-      if (!domainJson.isVerified) throw new Error(`Domain ${domain} not yet verified — DKIM requires a verified domain`);
-
-      // Check DKIM CNAMEs in public DNS via Cloudflare DoH
-      const dnsCheck1 = await fetch(
-        `https://cloudflare-dns.com/dns-query?name=selector1._domainkey.${domain}&type=CNAME`,
-        { headers: { Accept: "application/dns-json" } }
-      ).then(r => r.json()).catch(() => ({ Answer: [] }));
-
-      const dnsCheck2 = await fetch(
-        `https://cloudflare-dns.com/dns-query?name=selector2._domainkey.${domain}&type=CNAME`,
-        { headers: { Accept: "application/dns-json" } }
-      ).then(r => r.json()).catch(() => ({ Answer: [] }));
-
-      const sel1 = (dnsCheck1.Answer || []).length > 0;
-      const sel2 = (dnsCheck2.Answer || []).length > 0;
-
-      if (!sel1 || !sel2) {
-        const missing = [
-          !sel1 ? `selector1._domainkey.${domain}` : null,
-          !sel2 ? `selector2._domainkey.${domain}` : null,
-        ].filter(Boolean).join(", ");
-        throw new Error(`DKIM CNAMEs not yet in public DNS: ${missing}`);
-      }
-
-      return { enabled: true, domain, sel1, sel2, message: "DKIM CNAMEs are live in public DNS" };
-    }
-
-    default:
-      throw new Error(`Unknown action: ${action}`);
-  }
+  );
+  const data = await resp.json();
+  if (!data.access_token)
+    throw new Error(data.error_description || data.error || "Token error");
+  return data.access_token;
 }
 
-// ─── ROUTE ────────────────────────────────────────────────────────────────────
-app.post("/provision", async (req, res) => {
-  const { action, creds, data } = req.body || {};
+async function graph(token, method, urlPath, reqBody, extraHeaders = {}) {
+  const opts = {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      ...extraHeaders,
+    },
+  };
+  if (reqBody) opts.body = JSON.stringify(reqBody);
 
-  if (!action) {
-    return res.status(400).json({ ok: false, error: "Missing action" });
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const resp = await fetch(`https://graph.microsoft.com/v1.0${urlPath}`, opts);
+    if (resp.status === 429) {
+      const wait = (parseInt(resp.headers.get("Retry-After") || "15") + 3) * 1000;
+      await sleep(wait);
+      continue;
+    }
+    if (resp.status === 204 || resp.status === 404) return { status: resp.status };
+    const json = await resp.json();
+    if (!resp.ok) throw new Error(json.error?.message || `HTTP ${resp.status}`);
+    return json;
   }
+  throw new Error("Throttled by Microsoft — retry later.");
+}
+
+// ── Cloudflare helper (FIXED — correct Authorization header) ──────────────
+async function cfRequest(cfToken, method, urlPath, body) {
+  const opts = {
+    method,
+    headers: {
+      // ✅ FIXED: was missing "Bearer " prefix causing "Invalid request headers"
+      Authorization: `Bearer ${cfToken}`,
+      "Content-Type": "application/json",
+    },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const resp = await fetch(`https://api.cloudflare.com/client/v4${urlPath}`, opts);
+  const json = await resp.json();
+  if (!json.success) {
+    const errMsg = json.errors?.map((e) => e.message).join(", ") || "Cloudflare error";
+    throw new Error(errMsg);
+  }
+  return json;
+}
+
+async function getCFZoneId(cfToken, domain) {
+  // Try exact match first, then apex
+  const parts = domain.split(".");
+  const apex = parts.slice(-2).join(".");
+  const res = await cfRequest(cfToken, "GET", `/zones?name=${apex}&status=active`);
+  if (res.result && res.result.length > 0) return res.result[0].id;
+  throw new Error(`No Cloudflare zone found for "${domain}" (apex: ${apex})`);
+}
+
+// ── Main route ─────────────────────────────────────────────────────────────
+app.post("/graph", async (req, res) => {
+  const {
+    action, tenantId, clientId, clientSecret,
+    domain, userId, accessToken, cfToken,
+    firstName, lastName, password, upn,
+    usageLocation, skuId, records,
+  } = req.body || {};
 
   try {
-    const result = await handleProvision(action, creds || {}, data || {});
-    res.json({ ok: true, result });
+    // ── Auth ────────────────────────────────────────────────────────────
+    if (action === "auth") {
+      const token = await getToken(tenantId, clientId, clientSecret);
+      const org = await graph(token, "GET", "/organization");
+      const tenantName = org.value?.[0]?.displayName || "Unknown Tenant";
+      return res.json({ token, tenantName });
+    }
+
+    // ── Add domain ──────────────────────────────────────────────────────
+    if (action === "addDomain") {
+      try {
+        await graph(accessToken, "POST", "/domains", { id: domain });
+      } catch (e) {
+        // Already exists is fine
+        if (!e.message.includes("already exists") && !e.message.includes("ObjectConflict")) throw e;
+      }
+      return res.json({ ok: true });
+    }
+
+    // ── Get DNS verification records from Microsoft ──────────────────────
+    if (action === "getDnsRecords") {
+      const data = await graph(accessToken, "GET", `/domains/${domain}/verificationDnsRecords`);
+      const serviceData = await graph(accessToken, "GET", `/domains/${domain}/serviceConfigurationRecords`);
+      const all = [...(data.value || []), ...(serviceData.value || [])];
+      return res.json({ records: all });
+    }
+
+    // ── Verify domain ───────────────────────────────────────────────────
+    if (action === "verifyDomain") {
+      try {
+        await graph(accessToken, "POST", `/domains/${domain}/verify`, {});
+        return res.json({ verified: true });
+      } catch (e) {
+        return res.json({ verified: false, reason: e.message });
+      }
+    }
+
+    // ── Push DNS records to Cloudflare ──────────────────────────────────
+    if (action === "cloudflare") {
+      if (!cfToken) throw new Error("Cloudflare API token not provided");
+      const zoneId = await getCFZoneId(cfToken, domain);
+      const pushed = [];
+      const failed = [];
+
+      for (const rec of (records || [])) {
+        try {
+          // Map MS Graph record types to Cloudflare format
+          let type = rec["@odata.type"]?.split(".").pop() || rec.recordType;
+          let cfRec = null;
+
+          if (type === "txtRecord" || rec.text) {
+            cfRec = { type: "TXT", name: rec.label || "@", content: rec.text || rec.supportsTxt, ttl: 3600 };
+          } else if (type === "mxRecord" || rec.mailExchange) {
+            cfRec = { type: "MX", name: rec.label || "@", content: rec.mailExchange, priority: rec.preference || 10, ttl: 3600 };
+          } else if (type === "cnameRecord" || rec.canonicalName) {
+            cfRec = { type: "CNAME", name: rec.label, content: rec.canonicalName, ttl: 3600, proxied: false };
+          } else {
+            continue;
+          }
+
+          await cfRequest(cfToken, "POST", `/zones/${zoneId}/dns_records`, cfRec);
+          pushed.push(cfRec.type);
+        } catch (e) {
+          // Record already exists is fine
+          if (e.message.includes("already exists")) { pushed.push("(existing)"); continue; }
+          failed.push(e.message);
+        }
+      }
+      return res.json({ ok: true, pushed, failed });
+    }
+
+    // ── Test Cloudflare connection ──────────────────────────────────────
+    if (action === "testCloudflare") {
+      if (!cfToken) throw new Error("No token provided");
+      const res2 = await cfRequest(cfToken, "GET", "/zones?per_page=1");
+      return res.json({ ok: true, zoneCount: res2.result_info?.total_count || 0 });
+    }
+
+    // ── Create user ─────────────────────────────────────────────────────
+    if (action === "createUser") {
+      const displayName = `${firstName} ${lastName}`;
+      const userPrincipalName = upn || `${firstName.toLowerCase()}.${lastName.toLowerCase()}@${domain}`;
+      await graph(accessToken, "POST", "/users", {
+        accountEnabled: true,
+        displayName,
+        givenName: firstName,
+        surname: lastName,
+        userPrincipalName,
+        mailNickname: firstName.toLowerCase(),
+        passwordProfile: { password, forceChangePasswordNextSignIn: false },
+        usageLocation: usageLocation || "US",
+      });
+      return res.json({ ok: true, upn: userPrincipalName });
+    }
+
+    // ── Assign license ──────────────────────────────────────────────────
+    if (action === "assignLicense") {
+      await graph(accessToken, "POST", `/users/${upn}/assignLicense`, {
+        addLicenses: [{ skuId, disabledPlans: [] }],
+        removeLicenses: [],
+      });
+      return res.json({ ok: true });
+    }
+
+    // ── List users on domain ────────────────────────────────────────────
+    if (action === "listUsers") {
+      try {
+        const filter = encodeURIComponent(`endsWith(userPrincipalName,'@${domain}')`);
+        const data = await graph(accessToken, "GET",
+          `/users?$filter=${filter}&$select=id,displayName,userPrincipalName,assignedRoles&$count=true`,
+          null, { ConsistencyLevel: "eventual" }
+        );
+        return res.json({ users: data.value || [] });
+      } catch {
+        let users = [], url = `/users?$select=id,displayName,userPrincipalName&$top=999`;
+        while (url) {
+          const data = await graph(accessToken, "GET", url);
+          users = users.concat((data.value || []).filter(u =>
+            u.userPrincipalName?.toLowerCase().endsWith(`@${domain.toLowerCase()}`)
+          ));
+          url = data["@odata.nextLink"]?.replace("https://graph.microsoft.com/v1.0", "") || null;
+        }
+        return res.json({ users });
+      }
+    }
+
+    // ── Check admin role (skip if admin) ────────────────────────────────
+    if (action === "checkAdmin") {
+      try {
+        const data = await graph(accessToken, "GET", `/users/${userId}/memberOf`);
+        const roles = (data.value || []).filter(r =>
+          r["@odata.type"] === "#microsoft.graph.directoryRole"
+        );
+        return res.json({ isAdmin: roles.length > 0, roles: roles.map(r => r.displayName) });
+      } catch {
+        return res.json({ isAdmin: false, roles: [] });
+      }
+    }
+
+    // ── Delete user ─────────────────────────────────────────────────────
+    if (action === "deleteUser") {
+      await graph(accessToken, "DELETE", `/users/${userId}`);
+      return res.json({ ok: true });
+    }
+
+    // ── Check domain exists ─────────────────────────────────────────────
+    if (action === "checkDomain") {
+      try {
+        const d = await graph(accessToken, "GET", `/domains/${domain}`);
+        return res.json({ exists: !!(d && d.id) });
+      } catch (e) {
+        return res.json({ exists: false, reason: e.message });
+      }
+    }
+
+    // ── Remove domain ───────────────────────────────────────────────────
+    if (action === "removeDomain") {
+      await graph(accessToken, "DELETE", `/domains/${domain}`);
+      return res.json({ ok: true });
+    }
+
+    // ── Reset password ──────────────────────────────────────────────────
+    if (action === "resetPassword") {
+      await graph(accessToken, "PATCH", `/users/${userId}`, {
+        passwordProfile: { password, forceChangePasswordNextSignIn: false },
+      });
+      return res.json({ ok: true });
+    }
+
+    return res.status(400).json({ error: `Unknown action: ${action}` });
+
   } catch (err) {
-    res.json({ ok: false, error: err.message });
+    console.error(`[${action}]`, err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`M365 provisioner backend running on port ${PORT}`);
+// ── Fallback to index.html for SPA ────────────────────────────────────────
+app.get("*", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
 });
+
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
