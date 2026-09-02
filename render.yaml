@@ -1,12 +1,12 @@
 services:
   - type: web
-    name: m365-provisioner-backend
+    name: m365-provisioner
     env: node
     plan: free
     buildCommand: npm install
     startCommand: node server.js
     envVars:
-      - key: ALLOWED_ORIGIN
-        value: "*"
       - key: PORT
         value: 10000
+      - key: NODE_ENV
+        value: production
