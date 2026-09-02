@@ -1,0 +1,1083 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>M365 Cloudflare Provisioner</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#07090f;
+  --surface:#0d1117;
+  --surface2:#131920;
+  --surface3:#1a2233;
+  --border:#1e2a3a;
+  --border2:#253040;
+  --text:#c9d4e8;
+  --text2:#6b7a99;
+  --text3:#3d4d66;
+  --blue:#4d8ef0;
+  --blue2:#2d6acc;
+  --green:#22c55e;
+  --green2:#16a34a;
+  --red:#ef4444;
+  --amber:#f59e0b;
+  --purple:#8b5cf6;
+  --cyan:#06b6d4;
+  --r:6px;
+  --font:'Inter',system-ui,sans-serif;
+  --mono:'JetBrains Mono','Fira Code',monospace;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;line-height:1.5;min-height:100vh;display:flex;flex-direction:column}
+a{color:var(--blue);text-decoration:none}
+
+/* ── TOPBAR ── */
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 20px;height:48px;
+  background:var(--surface);border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:100;flex-shrink:0;
+}
+.topbar-brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:14px;letter-spacing:-.2px}
+.brand-icon{
+  width:28px;height:28px;border-radius:6px;
+  background:linear-gradient(135deg,var(--blue),var(--purple));
+  display:flex;align-items:center;justify-content:center;font-size:14px;
+}
+.topbar-meta{display:flex;align-items:center;gap:16px}
+.status-pill{
+  display:flex;align-items:center;gap:5px;
+  font-size:11px;color:var(--text2);
+  background:var(--surface2);border:1px solid var(--border);
+  padding:3px 10px;border-radius:20px;
+}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--text3)}
+.dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
+
+/* ── LAYOUT ── */
+.layout{display:flex;flex:1;overflow:hidden;height:calc(100vh - 48px)}
+
+/* ── SIDEBAR ── */
+.sidebar{
+  width:220px;flex-shrink:0;
+  background:var(--surface);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;overflow-y:auto;
+}
+.sidebar-section{padding:16px 12px 8px;font-size:10px;font-weight:600;color:var(--text3);letter-spacing:.8px;text-transform:uppercase}
+.nav-btn{
+  display:flex;align-items:center;gap:8px;
+  width:100%;padding:7px 12px;border:none;background:none;
+  color:var(--text2);font-size:12px;font-family:var(--font);
+  cursor:pointer;border-radius:var(--r);text-align:left;
+  transition:background .15s,color .15s;
+  margin-bottom:1px;
+}
+.nav-btn:hover{background:var(--surface2);color:var(--text)}
+.nav-btn.active{background:var(--surface3);color:var(--blue);border:1px solid var(--border2)}
+.nav-btn .icon{width:16px;text-align:center;flex-shrink:0}
+.nav-count{margin-left:auto;background:var(--surface3);border:1px solid var(--border2);border-radius:10px;padding:1px 6px;font-size:10px;color:var(--text2)}
+
+.sidebar-divider{height:1px;background:var(--border);margin:8px 12px}
+
+/* ── MAIN ── */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* ── TABS ── */
+.tabs{
+  display:flex;align-items:center;gap:2px;
+  padding:10px 20px 0;border-bottom:1px solid var(--border);
+  background:var(--surface);
+}
+.tab{
+  padding:7px 16px;border:none;background:none;
+  color:var(--text2);font-size:12px;font-family:var(--font);
+  cursor:pointer;border-bottom:2px solid transparent;
+  margin-bottom:-1px;transition:color .15s,border-color .15s;
+}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+.tab-count{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:16px;height:16px;border-radius:3px;
+  background:var(--surface3);font-size:9px;margin-left:5px;
+}
+
+/* ── CONTENT ── */
+.content{flex:1;overflow-y:auto;padding:20px}
+
+/* ── ACTION BAR ── */
+.action-bar{
+  display:flex;align-items:center;gap:8px;
+  padding:10px 20px;border-bottom:1px solid var(--border);
+  background:var(--surface);flex-wrap:wrap;
+}
+.btn{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:6px 14px;border-radius:var(--r);font-size:12px;
+  font-family:var(--font);cursor:pointer;border:1px solid transparent;
+  font-weight:500;transition:opacity .15s,filter .15s;white-space:nowrap;
+}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn:hover:not(:disabled){filter:brightness(1.1)}
+.btn-primary{background:var(--blue);color:#fff;border-color:var(--blue2)}
+.btn-danger{background:var(--red);color:#fff;border-color:#c53030}
+.btn-ghost{background:var(--surface2);color:var(--text);border-color:var(--border2)}
+.btn-success{background:var(--green2);color:#fff;border-color:var(--green2)}
+.btn-amber{background:#92400e;color:#fbbf24;border-color:#b45309}
+.btn-sm{padding:4px 10px;font-size:11px}
+
+/* ── CARDS ── */
+.card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);margin-bottom:12px;
+}
+.card-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 16px;border-bottom:1px solid var(--border);
+}
+.card-title{font-size:12px;font-weight:600;color:var(--text)}
+.card-body{padding:16px}
+
+/* ── FORMS ── */
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form-grid.cols3{grid-template-columns:1fr 1fr 1fr}
+.form-group{display:flex;flex-direction:column;gap:4px}
+.form-group.span2{grid-column:span 2}
+label{font-size:11px;color:var(--text2);font-weight:500}
+input,textarea,select{
+  background:var(--bg);border:1px solid var(--border2);
+  border-radius:var(--r);padding:7px 10px;
+  color:var(--text);font-family:var(--mono);font-size:12px;
+  width:100%;outline:none;transition:border-color .15s;
+}
+input:focus,textarea:focus,select:focus{border-color:var(--blue)}
+input::placeholder{color:var(--text3)}
+textarea{resize:vertical;min-height:80px}
+
+/* ── TENANT CARDS ── */
+.tenant-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-bottom:16px}
+.tenant-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);padding:14px;position:relative;
+}
+.tenant-card.connected{border-color:#1a3a2a}
+.tenant-card-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:10px}
+.tenant-name{font-size:13px;font-weight:600;color:var(--text)}
+.tenant-id{font-size:10px;color:var(--text3);font-family:var(--mono);margin-top:2px}
+.badge{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:2px 8px;border-radius:20px;font-size:10px;font-weight:600;
+}
+.badge-connected{background:#0a2a1a;color:var(--green);border:1px solid #1a4a2a}
+.badge-error{background:#2a0a0a;color:var(--red);border:1px solid #4a1a1a}
+.badge-pending{background:#1a1a0a;color:var(--amber);border:1px solid #3a2a0a}
+.badge-blue{background:#0a1a3a;color:var(--blue);border:1px solid #1a2a4a}
+.tenant-fields{display:flex;flex-direction:column;gap:6px}
+.tenant-field{display:flex;flex-direction:column;gap:3px}
+.tenant-field label{font-size:10px;color:var(--text3)}
+.tenant-field input{font-size:11px;padding:5px 8px}
+.tenant-actions{display:flex;gap:6px;margin-top:10px}
+.remove-tenant{
+  position:absolute;top:10px;right:10px;
+  background:none;border:none;color:var(--text3);
+  cursor:pointer;font-size:14px;padding:2px 6px;border-radius:4px;
+}
+.remove-tenant:hover{background:var(--surface2);color:var(--red)}
+
+/* ── DOMAIN TABLE ── */
+.domain-table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{
+  text-align:left;padding:8px 12px;
+  color:var(--text3);font-size:10px;font-weight:600;letter-spacing:.5px;
+  border-bottom:1px solid var(--border);white-space:nowrap;
+}
+td{padding:8px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.02)}
+.domain-name{font-family:var(--mono);font-size:12px;color:var(--text)}
+.step-indicator{display:flex;gap:3px;align-items:center}
+.step{
+  width:20px;height:20px;border-radius:4px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:9px;
+}
+.step-done{background:#0a2a1a;color:var(--green)}
+.step-fail{background:#2a0a0a;color:var(--red)}
+.step-wait{background:var(--surface2);color:var(--text3)}
+.step-run{background:#0a1a3a;color:var(--blue);animation:pulse 1s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+/* ── RESULTS ── */
+.result-row{
+  border:1px solid var(--border);border-radius:var(--r);
+  padding:12px 16px;margin-bottom:8px;
+  display:flex;align-items:flex-start;gap:12px;
+}
+.result-row.success{border-color:#1a3a2a;background:#060f0a}
+.result-row.failed{border-color:#3a1a1a;background:#0f0606}
+.result-icon{font-size:16px;flex-shrink:0;margin-top:1px}
+.result-domain{font-family:var(--mono);font-size:13px;font-weight:600;margin-bottom:4px}
+.result-user{font-size:11px;color:var(--text2)}
+.result-meta{font-size:10px;color:var(--text3);margin-top:3px;font-family:var(--mono)}
+
+/* ── LOG ── */
+.log-panel{
+  width:340px;flex-shrink:0;
+  border-left:1px solid var(--border);
+  background:var(--surface);
+  display:flex;flex-direction:column;
+  font-family:var(--mono);
+}
+.log-header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 14px;border-bottom:1px solid var(--border);
+  font-size:11px;font-weight:600;color:var(--text2);flex-shrink:0;
+}
+.log-body{flex:1;overflow-y:auto;padding:10px 14px;font-size:11px}
+.log-entry{
+  padding:2px 0;display:flex;gap:8px;align-items:flex-start;
+  border-bottom:1px solid rgba(255,255,255,.03);
+}
+.log-time{color:var(--text3);flex-shrink:0;font-size:10px;padding-top:1px}
+.log-msg{color:var(--text2);line-height:1.4;word-break:break-all}
+.log-msg.ok{color:var(--green)}
+.log-msg.err{color:var(--red)}
+.log-msg.warn{color:var(--amber)}
+.log-msg.info{color:var(--blue)}
+.log-msg.head{color:var(--cyan);font-weight:600}
+
+/* ── STATS BAR ── */
+.stats-bar{
+  display:flex;gap:1px;padding:10px 20px;
+  background:var(--surface);border-bottom:1px solid var(--border);
+}
+.stat{
+  flex:1;display:flex;flex-direction:column;gap:2px;
+  padding:8px 14px;background:var(--surface2);
+  border-radius:var(--r);margin-right:8px;
+}
+.stat:last-child{margin-right:0}
+.stat-val{font-size:20px;font-weight:700;color:var(--text);line-height:1}
+.stat-label{font-size:10px;color:var(--text3)}
+
+/* ── PROGRESS ── */
+.progress-wrap{margin-top:6px}
+.progress-bar{height:3px;background:var(--surface3);border-radius:2px;overflow:hidden}
+.progress-fill{height:100%;background:var(--blue);border-radius:2px;transition:width .4s ease}
+
+/* ── EMPTY ── */
+.empty{
+  display:flex;flex-direction:column;align-items:center;
+  justify-content:center;padding:60px 20px;
+  color:var(--text3);text-align:center;
+}
+.empty-icon{font-size:40px;margin-bottom:16px;opacity:.4}
+.empty-title{font-size:14px;font-weight:600;color:var(--text2);margin-bottom:6px}
+.empty-sub{font-size:12px;max-width:280px;line-height:1.5}
+
+/* ── CONNECT TOOLS ── */
+.connect-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.connect-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);padding:20px;
+}
+.connect-card.configured{border-color:#1a3a2a}
+.connect-icon{font-size:28px;margin-bottom:10px}
+.connect-name{font-size:14px;font-weight:600;margin-bottom:4px}
+.connect-desc{font-size:12px;color:var(--text2);margin-bottom:14px;line-height:1.5}
+
+/* ── HISTORY ── */
+.history-item{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--r);padding:14px 16px;margin-bottom:8px;
+  display:flex;align-items:center;gap:14px;
+}
+.history-date{font-size:11px;color:var(--text3);font-family:var(--mono);white-space:nowrap}
+.history-info{flex:1}
+.history-title{font-size:13px;font-weight:600;margin-bottom:3px}
+.history-meta{font-size:11px;color:var(--text2)}
+.history-badges{display:flex;gap:6px}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+/* ── MODAL ── */
+.modal-overlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.7);
+  display:flex;align-items:center;justify-content:center;z-index:200;
+}
+.modal{
+  background:var(--surface);border:1px solid var(--border2);
+  border-radius:10px;padding:24px;width:500px;max-width:90vw;
+}
+.modal-title{font-size:15px;font-weight:700;margin-bottom:6px}
+.modal-sub{font-size:12px;color:var(--text2);margin-bottom:20px;line-height:1.5}
+.modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:20px}
+
+/* ── DNS TABLE ── */
+.dns-row{
+  background:var(--bg);border:1px solid var(--border);
+  border-radius:var(--r);padding:10px 14px;margin-bottom:6px;
+  font-family:var(--mono);font-size:11px;
+}
+.dns-type{color:var(--purple);font-weight:600;display:inline-block;width:48px}
+.dns-host{color:var(--cyan)}
+.dns-val{color:var(--text2);word-break:break-all}
+
+.hidden{display:none!important}
+.flex{display:flex}
+.gap8{gap:8px}
+.ml-auto{margin-left:auto}
+</style>
+</head>
+<body>
+
+<!-- TOPBAR -->
+<div class="topbar">
+  <div class="topbar-brand">
+    <div class="brand-icon">⚡</div>
+    <span>M365 Cloudflare Provisioner</span>
+  </div>
+  <div class="topbar-meta">
+    <div class="status-pill" id="runStatus">
+      <div class="dot" id="runDot"></div>
+      <span id="runStatusText">Idle</span>
+    </div>
+    <button class="btn btn-ghost btn-sm" onclick="exportCSV()">⬇ CSV</button>
+    <button class="btn btn-danger btn-sm" id="stopBtn" onclick="stopRun()" disabled>■ Stop</button>
+  </div>
+</div>
+
+<!-- LAYOUT -->
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="sidebar-section">Workbench</div>
+    <button class="nav-btn active" id="nav-tenants" onclick="showTab('tenants')">
+      <span class="icon">🏢</span> Tenants
+      <span class="nav-count" id="cnt-tenants">0</span>
+    </button>
+    <button class="nav-btn" id="nav-domains" onclick="showTab('domains')">
+      <span class="icon">🌐</span> Domains
+      <span class="nav-count" id="cnt-domains">0</span>
+    </button>
+    <button class="nav-btn" id="nav-results" onclick="showTab('results')">
+      <span class="icon">✓</span> Results
+      <span class="nav-count" id="cnt-results">0</span>
+    </button>
+    <div class="sidebar-divider"></div>
+    <div class="sidebar-section">Settings</div>
+    <button class="nav-btn" id="nav-connect" onclick="showTab('connect')">
+      <span class="icon">🔗</span> Connect Tools
+    </button>
+    <button class="nav-btn" id="nav-history" onclick="showTab('history')">
+      <span class="icon">📋</span> History
+    </button>
+  </div>
+
+  <!-- MAIN AREA -->
+  <div class="main">
+
+    <!-- ACTION BAR -->
+    <div class="action-bar">
+      <div id="actionBarContent">
+        <button class="btn btn-primary" onclick="showAddTenant()">+ Add Tenant</button>
+        <button class="btn btn-ghost" onclick="authAllTenants()" id="authBtn">🔐 Auth All</button>
+      </div>
+      <div class="ml-auto flex gap8">
+        <button class="btn btn-success" id="runBtn" onclick="startRun()" disabled>▶ Run Automation</button>
+      </div>
+    </div>
+
+    <!-- STATS -->
+    <div class="stats-bar" id="statsBar" style="display:none">
+      <div class="stat">
+        <div class="stat-val" id="stat-total">0</div>
+        <div class="stat-label">Total Domains</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" id="stat-done" style="color:var(--green)">0</div>
+        <div class="stat-label">Completed</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" id="stat-fail" style="color:var(--red)">0</div>
+        <div class="stat-label">Failed</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" id="stat-pct">0%</div>
+        <div class="stat-label">Progress</div>
+      </div>
+    </div>
+
+    <!-- TABS -->
+    <div class="tabs">
+      <button class="tab active" id="tab-tenants" onclick="showTab('tenants')">🏢 Tenants <span class="tab-count" id="tabcnt-tenants">0</span></button>
+      <button class="tab" id="tab-domains" onclick="showTab('domains')">🌐 Domains <span class="tab-count" id="tabcnt-domains">0</span></button>
+      <button class="tab" id="tab-results" onclick="showTab('results')">Results <span class="tab-count" id="tabcnt-results">0</span></button>
+      <button class="tab" id="tab-connect" onclick="showTab('connect')">⚙ Connect Tools</button>
+      <button class="tab" id="tab-history" onclick="showTab('history')">History</button>
+    </div>
+
+    <!-- CONTENT PANELS -->
+    <div class="content" id="panel-tenants">
+      <div class="tenant-grid" id="tenantGrid"></div>
+      <div class="empty hidden" id="tenantEmpty">
+        <div class="empty-icon">🏢</div>
+        <div class="empty-title">No tenants yet</div>
+        <div class="empty-sub">Add your first Microsoft 365 tenant to get started.</div>
+        <button class="btn btn-primary" style="margin-top:16px" onclick="showAddTenant()">+ Add Tenant</button>
+      </div>
+    </div>
+
+    <div class="content hidden" id="panel-domains">
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Domain List</div>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('domainFileInput').click()">📁 Import CSV</button>
+        </div>
+        <div class="card-body">
+          <input id="domainFileInput" type="file" accept=".csv,.txt" class="hidden" onchange="importDomainCSV(event)"/>
+          <div style="margin-bottom:12px">
+            <label style="display:block;margin-bottom:6px">Add domains (one per line, with optional user info)</label>
+            <textarea id="domainInput" placeholder="domain.com&#10;domain2.com FirstName LastName password123&#10;domain3.com" style="min-height:120px;font-family:var(--mono);font-size:12px"></textarea>
+            <div style="font-size:11px;color:var(--text3);margin-top:4px">Format: <code style="color:var(--cyan)">domain.com [FirstName LastName password]</code> — password optional, auto-generated if omitted</div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-primary" onclick="parseDomains()">+ Add Domains</button>
+            <button class="btn btn-ghost" onclick="clearDomains()">Clear All</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Domain Queue</div>
+          <span id="domainCountLabel" style="font-size:11px;color:var(--text2)">0 domains</span>
+        </div>
+        <div class="card-body" style="padding:0">
+          <div class="domain-table-wrap">
+            <table id="domainTable">
+              <thead>
+                <tr>
+                  <th>Domain</th>
+                  <th>User</th>
+                  <th>Add DNS</th>
+                  <th>Verify</th>
+                  <th>CF DNS</th>
+                  <th>DKIM+DMARC</th>
+                  <th>Users+Lic</th>
+                  <th>Auto-Save</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="domainTbody"></tbody>
+            </table>
+            <div class="empty hidden" id="domainEmpty" style="padding:40px">
+              <div class="empty-icon">🌐</div>
+              <div class="empty-title">No domains queued</div>
+              <div class="empty-sub">Add domains above or import a CSV file.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="content hidden" id="panel-results">
+      <div id="resultsContainer">
+        <div class="empty" id="resultsEmpty">
+          <div class="empty-icon">✓</div>
+          <div class="empty-title">No results yet</div>
+          <div class="empty-sub">Run the automation to see results here.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="content hidden" id="panel-connect">
+      <div class="connect-grid">
+        <!-- Cloudflare -->
+        <div class="connect-card" id="cfCard">
+          <div class="connect-icon">🟠</div>
+          <div class="connect-name">Cloudflare</div>
+          <div class="connect-desc">Automatically create and verify DNS records for each domain in your Cloudflare zones.</div>
+          <div class="form-group" style="margin-bottom:10px">
+            <label>API Token</label>
+            <input type="password" id="cfToken" placeholder="Cloudflare API Token" oninput="saveCreds()"/>
+          </div>
+          <div style="font-size:11px;color:var(--text3);margin-bottom:12px">
+            Token needs: <strong style="color:var(--text)">Zone:Read</strong> + <strong style="color:var(--text)">DNS:Edit</strong> permissions
+          </div>
+          <button class="btn btn-ghost btn-sm" onclick="testCF()">🔍 Test Connection</button>
+          <span id="cfStatus" style="font-size:11px;margin-left:8px"></span>
+        </div>
+
+        <!-- User defaults -->
+        <div class="connect-card" id="userDefaultsCard">
+          <div class="connect-icon">👤</div>
+          <div class="connect-name">User Defaults</div>
+          <div class="connect-desc">Default settings applied when creating users — license SKU, password policy, and display name format.</div>
+          <div class="form-group" style="margin-bottom:10px">
+            <label>License SKU ID</label>
+            <input type="text" id="defaultSku" placeholder="e.g. O365_BUSINESS_ESSENTIALS" oninput="saveCreds()"/>
+          </div>
+          <div class="form-group" style="margin-bottom:10px">
+            <label>Default Password (if not specified per domain)</label>
+            <input type="text" id="defaultPassword" placeholder="auto-generated if empty" oninput="saveCreds()"/>
+          </div>
+          <div class="form-group">
+            <label>Usage Location (2-letter country code)</label>
+            <input type="text" id="usageLocation" placeholder="US" maxlength="2" oninput="saveCreds()"/>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="content hidden" id="panel-history">
+      <div id="historyContainer">
+        <div class="empty">
+          <div class="empty-icon">📋</div>
+          <div class="empty-title">No history yet</div>
+          <div class="empty-sub">Completed runs will appear here.</div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /main -->
+
+  <!-- LOG PANEL -->
+  <div class="log-panel">
+    <div class="log-header">
+      <span>Execution Log</span>
+      <div style="display:flex;align-items:center;gap:6px">
+        <div class="dot live" id="logDot" style="display:none"></div>
+        <span id="logLiveLabel" style="color:var(--green);font-size:10px;display:none">LIVE</span>
+        <button class="btn btn-ghost btn-sm" onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div class="log-body" id="logBody">
+      <div style="color:var(--text3);font-size:11px;padding:10px 0;text-align:center">Ready — add tenants and domains to begin</div>
+    </div>
+  </div>
+
+</div><!-- /layout -->
+
+<!-- ADD TENANT MODAL -->
+<div class="modal-overlay hidden" id="addTenantModal">
+  <div class="modal">
+    <div class="modal-title">Add Microsoft 365 Tenant</div>
+    <div class="modal-sub">Enter your Azure App Registration credentials. These are stored locally in your browser session only.</div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Tenant Name (label)</label>
+      <input type="text" id="mt-name" placeholder="e.g. Contoso Corp"/>
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Tenant ID</label>
+      <input type="text" id="mt-tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" style="font-family:var(--mono)"/>
+    </div>
+    <div class="form-group" style="margin-bottom:12px">
+      <label>Client ID</label>
+      <input type="text" id="mt-clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" style="font-family:var(--mono)"/>
+    </div>
+    <div class="form-group">
+      <label>Client Secret</label>
+      <input type="password" id="mt-clientSecret" placeholder="••••••••••••••••••••••••••••••••"/>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="addTenant()">Add Tenant</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── STATE ──────────────────────────────────────────────────────────────────
+const API = '/graph';
+let tenants = [];
+let domains = [];
+let results = [];
+let running = false;
+let stopRequested = false;
+let currentTab = 'tenants';
+
+// ── INIT ───────────────────────────────────────────────────────────────────
+window.onload = () => {
+  loadCreds();
+  renderTenants();
+  renderDomains();
+  updateCounts();
+};
+
+function loadCreds(){
+  const s = JSON.parse(sessionStorage.getItem('m365creds')||'{}');
+  if(s.cfToken) document.getElementById('cfToken').value = s.cfToken;
+  if(s.defaultSku) document.getElementById('defaultSku').value = s.defaultSku;
+  if(s.defaultPassword) document.getElementById('defaultPassword').value = s.defaultPassword;
+  if(s.usageLocation) document.getElementById('usageLocation').value = s.usageLocation;
+  if(s.tenants) { tenants = s.tenants; }
+}
+
+function saveCreds(){
+  const s = JSON.parse(sessionStorage.getItem('m365creds')||'{}');
+  s.cfToken = document.getElementById('cfToken').value;
+  s.defaultSku = document.getElementById('defaultSku').value;
+  s.defaultPassword = document.getElementById('defaultPassword').value;
+  s.usageLocation = document.getElementById('usageLocation').value;
+  s.tenants = tenants;
+  sessionStorage.setItem('m365creds', JSON.stringify(s));
+}
+
+// ── TAB NAVIGATION ─────────────────────────────────────────────────────────
+function showTab(tab){
+  ['tenants','domains','results','connect','history'].forEach(t => {
+    document.getElementById('panel-'+t).classList.toggle('hidden', t !== tab);
+    document.getElementById('tab-'+t)?.classList.toggle('active', t === tab);
+    document.getElementById('nav-'+t)?.classList.toggle('active', t === tab);
+  });
+  currentTab = tab;
+}
+
+function updateCounts(){
+  const tc = tenants.length;
+  const dc = domains.length;
+  const rc = results.length;
+  ['cnt-tenants','tabcnt-tenants'].forEach(id => document.getElementById(id).textContent = tc);
+  ['cnt-domains','tabcnt-domains'].forEach(id => document.getElementById(id).textContent = dc);
+  ['cnt-results','tabcnt-results'].forEach(id => document.getElementById(id).textContent = rc);
+  document.getElementById('runBtn').disabled = !(tc > 0 && dc > 0);
+}
+
+// ── TENANT MANAGEMENT ──────────────────────────────────────────────────────
+function showAddTenant(){
+  ['mt-name','mt-tenantId','mt-clientId','mt-clientSecret'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('addTenantModal').classList.remove('hidden');
+}
+function closeModal(){ document.getElementById('addTenantModal').classList.add('hidden'); }
+
+function addTenant(){
+  const name = document.getElementById('mt-name').value.trim();
+  const tenantId = document.getElementById('mt-tenantId').value.trim();
+  const clientId = document.getElementById('mt-clientId').value.trim();
+  const clientSecret = document.getElementById('mt-clientSecret').value.trim();
+  if(!name||!tenantId||!clientId||!clientSecret){ alert('All fields required'); return; }
+  tenants.push({ id: Date.now(), name, tenantId, clientId, clientSecret, status:'pending', token:null });
+  closeModal();
+  saveCreds();
+  renderTenants();
+  updateCounts();
+  log(`Tenant "${name}" added`, 'info');
+}
+
+function removeTenant(id){
+  tenants = tenants.filter(t => t.id !== id);
+  saveCreds();
+  renderTenants();
+  updateCounts();
+}
+
+function renderTenants(){
+  const grid = document.getElementById('tenantGrid');
+  const empty = document.getElementById('tenantEmpty');
+  grid.innerHTML = '';
+  if(!tenants.length){ empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  tenants.forEach(t => {
+    const badge = t.status === 'connected'
+      ? '<span class="badge badge-connected">✓ Connected</span>'
+      : t.status === 'error'
+      ? '<span class="badge badge-error">✗ Error</span>'
+      : '<span class="badge badge-pending">● Pending</span>';
+    grid.innerHTML += `
+    <div class="tenant-card ${t.status==='connected'?'connected':''}" id="tc-${t.id}">
+      <button class="remove-tenant" onclick="removeTenant(${t.id})">✕</button>
+      <div class="tenant-card-header">
+        <div>
+          <div class="tenant-name">${t.name}</div>
+          <div class="tenant-id">${t.tenantId.substring(0,8)}…</div>
+        </div>
+        ${badge}
+      </div>
+      <div class="tenant-actions">
+        <button class="btn btn-ghost btn-sm" onclick="authTenant(${t.id})">🔐 Authenticate</button>
+      </div>
+    </div>`;
+  });
+}
+
+async function authTenant(id){
+  const t = tenants.find(x => x.id === id);
+  if(!t) return;
+  log(`Authenticating "${t.name}"…`);
+  try {
+    const r = await post({ action:'auth', tenantId:t.tenantId, clientId:t.clientId, clientSecret:t.clientSecret });
+    t.token = r.token;
+    t.status = 'connected';
+    t.displayName = r.tenantName;
+    log(`✓ "${t.name}" authenticated — ${r.tenantName}`, 'ok');
+  } catch(e){
+    t.status = 'error';
+    log(`✗ "${t.name}": ${e.message}`, 'err');
+  }
+  saveCreds();
+  renderTenants();
+}
+
+async function authAllTenants(){
+  log('Authenticating all tenants…', 'head');
+  for(let i=0; i<tenants.length; i++){
+    await authTenant(tenants[i].id);
+  }
+  const ok = tenants.filter(t=>t.status==='connected').length;
+  log(`${ok}/${tenants.length} tenant(s) ready`, ok===tenants.length?'ok':'warn');
+  updateRunBtn();
+}
+
+function updateRunBtn(){
+  const hasAuth = tenants.some(t=>t.status==='connected');
+  document.getElementById('runBtn').disabled = !(hasAuth && domains.length > 0);
+}
+
+// ── DOMAIN MANAGEMENT ──────────────────────────────────────────────────────
+function parseDomains(){
+  const raw = document.getElementById('domainInput').value.trim();
+  if(!raw) return;
+  const lines = raw.split('\n').map(l=>l.trim()).filter(Boolean);
+  let added = 0;
+  lines.forEach(line => {
+    const parts = line.split(/\s+/);
+    const domain = parts[0].toLowerCase();
+    if(!domain.includes('.')) return;
+    if(domains.find(d=>d.domain===domain)) return;
+    const firstName = parts[1] || 'User';
+    const lastName = parts[2] || domain.split('.')[0];
+    const password = parts[3] || genPassword();
+    domains.push({ domain, firstName, lastName, password, status:'pending', steps:{} });
+    added++;
+  });
+  document.getElementById('domainInput').value = '';
+  if(added) log(`Added ${added} domain(s)`, 'info');
+  renderDomains();
+  updateCounts();
+  updateRunBtn();
+}
+
+function importDomainCSV(evt){
+  const file = evt.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById('domainInput').value = e.target.result;
+    parseDomains();
+  };
+  reader.readAsText(file);
+  evt.target.value = '';
+}
+
+function clearDomains(){
+  if(!confirm('Clear all domains?')) return;
+  domains = [];
+  renderDomains();
+  updateCounts();
+  updateRunBtn();
+}
+
+function removeDomain(domain){
+  domains = domains.filter(d=>d.domain!==domain);
+  renderDomains();
+  updateCounts();
+  updateRunBtn();
+}
+
+function renderDomains(){
+  const tbody = document.getElementById('domainTbody');
+  const empty = document.getElementById('domainEmpty');
+  const countLabel = document.getElementById('domainCountLabel');
+  countLabel.textContent = `${domains.length} domain${domains.length===1?'':'s'}`;
+  tbody.innerHTML = '';
+  if(!domains.length){ empty.classList.remove('hidden'); return; }
+  empty.classList.add('hidden');
+  domains.forEach(d => {
+    const s = d.steps;
+    const stepHtml = (key, label) => {
+      const v = s[key];
+      const cls = v==='ok'?'step-done':v==='fail'?'step-fail':v==='running'?'step-run':'step-wait';
+      const ic = v==='ok'?'✓':v==='fail'?'✗':v==='running'?'…':'·';
+      return `<span class="step ${cls}" title="${label}">${ic}</span>`;
+    };
+    const statusBadge = d.status==='done'
+      ? '<span class="badge badge-connected">Done</span>'
+      : d.status==='failed'
+      ? '<span class="badge badge-error">Failed</span>'
+      : d.status==='running'
+      ? '<span class="badge badge-blue">Running</span>'
+      : '<span class="badge badge-pending">Queued</span>';
+
+    tbody.innerHTML += `<tr id="dr-${d.domain.replace(/\./g,'_')}">
+      <td class="domain-name">${d.domain}</td>
+      <td style="color:var(--text2);font-size:11px">${d.firstName} ${d.lastName}</td>
+      <td><div class="step-indicator">${stepHtml('addDomain','Add Domain')}</div></td>
+      <td><div class="step-indicator">${stepHtml('verify','Verify DNS')}</div></td>
+      <td><div class="step-indicator">${stepHtml('cloudflare','Cloudflare DNS')}</div></td>
+      <td><div class="step-indicator">${stepHtml('dkim','DKIM+DMARC')}</div></td>
+      <td><div class="step-indicator">${stepHtml('users','Users+Licenses')}</div></td>
+      <td><div class="step-indicator">${stepHtml('autosave','Auto Save')}</div></td>
+      <td>${statusBadge}</td>
+      <td><button class="btn btn-ghost btn-sm" onclick="removeDomain('${d.domain}')" ${running?'disabled':''}>✕</button></td>
+    </tr>`;
+  });
+}
+
+// ── AUTOMATION RUN ─────────────────────────────────────────────────────────
+async function startRun(){
+  const connectedTenants = tenants.filter(t=>t.status==='connected');
+  if(!connectedTenants.length){ alert('Authenticate at least one tenant first'); return; }
+  if(!domains.length){ alert('Add domains first'); return; }
+
+  running = true;
+  stopRequested = false;
+  results = [];
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
+  document.getElementById('statsBar').style.display = 'flex';
+  document.getElementById('runDot').classList.add('live');
+  document.getElementById('runStatusText').textContent = 'Running';
+  document.getElementById('logDot').style.display = 'inline-block';
+  document.getElementById('logLiveLabel').style.display = 'inline';
+
+  const cfToken = document.getElementById('cfToken').value.trim();
+  const sku = document.getElementById('defaultSku').value.trim();
+  const usageLoc = document.getElementById('usageLocation').value.trim() || 'US';
+
+  log(`Processing ${domains.length} domain(s) across ${connectedTenants.length} tenant(s)…`, 'head');
+
+  let tenantIdx = 0;
+  for(const d of domains){
+    if(stopRequested) break;
+    const tenant = connectedTenants[tenantIdx % connectedTenants.length];
+    tenantIdx++;
+
+    log(`— ${d.domain}`, 'head');
+    d.status = 'running';
+    renderDomains();
+
+    let ok = true;
+
+    // Step 1: Add domain
+    try {
+      setStep(d, 'addDomain', 'running');
+      await post({ action:'addDomain', accessToken:tenant.token, domain:d.domain });
+      setStep(d, 'addDomain', 'ok');
+      log(`✓ Domain added to tenant "${tenant.name}"`, 'ok');
+    } catch(e){
+      setStep(d, 'addDomain', 'fail');
+      log(`✗ Add domain: ${e.message}`, 'err');
+      ok = false;
+    }
+
+    // Step 2: Get DNS records + push to Cloudflare
+    if(ok && cfToken){
+      try {
+        setStep(d, 'cloudflare', 'running');
+        const dnsRes = await post({ action:'getDnsRecords', accessToken:tenant.token, domain:d.domain });
+        const records = dnsRes.records || [];
+        log(`Fetched ${records.length} DNS records from Microsoft`, 'info');
+
+        // Push to Cloudflare
+        const cfRes = await post({ action:'cloudflare', cfToken, domain:d.domain, records });
+        if(cfRes.error) throw new Error(cfRes.error);
+        setStep(d, 'cloudflare', 'ok');
+        log(`✓ DNS records pushed to Cloudflare`, 'ok');
+      } catch(e){
+        setStep(d, 'cloudflare', 'fail');
+        log(`✗ Cloudflare: ${e.message}`, 'err');
+        ok = false;
+      }
+    } else if(!cfToken){
+      setStep(d, 'cloudflare', 'fail');
+      log(`⚠ Cloudflare token not set — skipping DNS push`, 'warn');
+    }
+
+    // Step 3: Verify domain
+    if(ok){
+      try {
+        setStep(d, 'verify', 'running');
+        await sleep(3000);
+        const vRes = await post({ action:'verifyDomain', accessToken:tenant.token, domain:d.domain });
+        if(vRes.verified){
+          setStep(d, 'verify', 'ok');
+          log(`✓ Domain verified`, 'ok');
+        } else {
+          setStep(d, 'verify', 'fail');
+          log(`⚠ Domain not yet verified (DNS propagation may take time)`, 'warn');
+        }
+      } catch(e){
+        setStep(d, 'verify', 'fail');
+        log(`✗ Verify: ${e.message}`, 'err');
+      }
+    }
+
+    // Step 4: Create user + assign license
+    if(ok){
+      try {
+        setStep(d, 'users', 'running');
+        const pwd = d.password || document.getElementById('defaultPassword').value.trim() || genPassword();
+        const upn = `${d.firstName.toLowerCase()}.${d.lastName.toLowerCase()}@${d.domain}`;
+        await post({
+          action:'createUser', accessToken:tenant.token,
+          domain:d.domain, firstName:d.firstName, lastName:d.lastName,
+          password:pwd, upn, usageLocation:usageLoc
+        });
+        log(`✓ User created: ${upn}`, 'ok');
+        if(sku){
+          await post({ action:'assignLicense', accessToken:tenant.token, upn, skuId:sku });
+          log(`✓ License assigned (${sku})`, 'ok');
+        }
+        setStep(d, 'users', 'ok');
+        d.createdUpn = upn;
+        d.createdPwd = pwd;
+      } catch(e){
+        setStep(d, 'users', 'fail');
+        log(`✗ User/license: ${e.message}`, 'err');
+        ok = false;
+      }
+    }
+
+    // Step 5: Auto-save result
+    setStep(d, 'autosave', 'ok');
+
+    d.status = ok ? 'done' : 'failed';
+    results.push({ domain:d.domain, user:`${d.firstName} ${d.lastName}`, upn:d.createdUpn, password:d.createdPwd, status:ok?'success':'failed', tenant:tenant.name });
+    renderDomains();
+    renderResults();
+    updateStats();
+  }
+
+  running = false;
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+  document.getElementById('runDot').classList.remove('live');
+  document.getElementById('runStatusText').textContent = 'Idle';
+  document.getElementById('logDot').style.display = 'none';
+  document.getElementById('logLiveLabel').style.display = 'none';
+  const doneCount = results.filter(r=>r.status==='success').length;
+  log(`Run complete — ${doneCount}/${results.length} succeeded`, doneCount===results.length?'ok':'warn');
+}
+
+function stopRun(){
+  stopRequested = true;
+  log('Stop requested…', 'warn');
+  document.getElementById('stopBtn').disabled = true;
+}
+
+function setStep(d, key, val){
+  d.steps[key] = val;
+  renderDomains();
+}
+
+function updateStats(){
+  const total = domains.length;
+  const done = domains.filter(d=>d.status==='done').length;
+  const fail = domains.filter(d=>d.status==='failed').length;
+  const pct = total ? Math.round((done+fail)/total*100) : 0;
+  document.getElementById('stat-total').textContent = total;
+  document.getElementById('stat-done').textContent = done;
+  document.getElementById('stat-fail').textContent = fail;
+  document.getElementById('stat-pct').textContent = pct+'%';
+}
+
+function renderResults(){
+  const container = document.getElementById('resultsContainer');
+  const empty = document.getElementById('resultsEmpty');
+  if(!results.length){ container.innerHTML=''; container.appendChild(empty); return; }
+  let html = '';
+  results.forEach(r => {
+    html += `<div class="result-row ${r.status}">
+      <div class="result-icon">${r.status==='success'?'✅':'❌'}</div>
+      <div style="flex:1">
+        <div class="result-domain">${r.domain}</div>
+        <div class="result-user">${r.user}${r.upn?' · '+r.upn:''}</div>
+        <div class="result-meta">Tenant: ${r.tenant}${r.password?' · Pwd: '+r.password:''}</div>
+      </div>
+      <span class="badge ${r.status==='success'?'badge-connected':'badge-error'}">${r.status==='success'?'Success':'Failed'}</span>
+    </div>`;
+  });
+  container.innerHTML = html;
+  updateCounts();
+}
+
+// ── CLOUDFLARE TEST ────────────────────────────────────────────────────────
+async function testCF(){
+  const token = document.getElementById('cfToken').value.trim();
+  if(!token){ alert('Enter a Cloudflare API token first'); return; }
+  const el = document.getElementById('cfStatus');
+  el.textContent = 'Testing…'; el.style.color = 'var(--text2)';
+  try {
+    const r = await post({ action:'testCloudflare', cfToken:token });
+    if(r.ok){
+      el.textContent = '✓ Connected'; el.style.color = 'var(--green)';
+      document.getElementById('cfCard').classList.add('configured');
+    } else {
+      el.textContent = '✗ '+r.error; el.style.color = 'var(--red)';
+    }
+  } catch(e){
+    el.textContent = '✗ '+e.message; el.style.color = 'var(--red)';
+  }
+}
+
+// ── CSV EXPORT ─────────────────────────────────────────────────────────────
+function exportCSV(){
+  if(!results.length){ alert('No results to export yet'); return; }
+  const rows = [['domain','firstName','lastName','upn','password','tenant','status']];
+  results.forEach(r => {
+    const d = domains.find(x=>x.domain===r.domain)||{};
+    rows.push([r.domain, d.firstName||'', d.lastName||'', r.upn||'', r.password||'', r.tenant, r.status]);
+  });
+  const csv = rows.map(r=>r.map(v=>`"${v}"`).join(',')).join('\n');
+  const a = document.createElement('a');
+  a.href = 'data:text/csv;charset=utf-8,'+encodeURIComponent(csv);
+  a.download = `m365-results-${Date.now()}.csv`;
+  a.click();
+}
+
+// ── UTILITIES ──────────────────────────────────────────────────────────────
+function log(msg, type=''){
+  const body = document.getElementById('logBody');
+  const now = new Date();
+  const time = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = `<span class="log-time">${time}</span><span class="log-msg ${type}">${msg}</span>`;
+  if(body.children.length === 1 && body.children[0].tagName !== 'DIV'.valueOf()) body.innerHTML = '';
+  body.appendChild(entry);
+  body.scrollTop = body.scrollHeight;
+}
+
+function clearLog(){
+  document.getElementById('logBody').innerHTML = '<div style="color:var(--text3);font-size:11px;padding:10px 0;text-align:center">Log cleared</div>';
+}
+
+function genPassword(){
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$';
+  let p = '';
+  for(let i=0;i<14;i++) p += chars[Math.floor(Math.random()*chars.length)];
+  return p;
+}
+
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+async function post(body){
+  const res = await fetch(API, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(body)
+  });
+  const data = await res.json();
+  if(!res.ok) throw new Error(data.error||data.message||`HTTP ${res.status}`);
+  return data;
+}
+</script>
+</body>
+</html>
