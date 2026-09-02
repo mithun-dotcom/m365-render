@@ -1,7 +1,7 @@
 {
-  "name": "m365-provisioner-backend",
-  "version": "1.0.0",
-  "description": "M365 + Cloudflare provisioner backend for Render.com",
+  "name": "m365-provisioner",
+  "version": "2.0.0",
+  "description": "M365 + Cloudflare provisioner — backend + frontend on Render",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
