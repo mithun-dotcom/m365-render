@@ -11,6 +11,11 @@ app.use(express.json());
 // ── Serve frontend ────────────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
 
+// ── Health / ping endpoint (used to wake the server on Render free tier) ──
+app.get("/ping", (req, res) => {
+  res.json({ ok: true, status: "awake", time: new Date().toISOString() });
+});
+
 // ── Helpers ───────────────────────────────────────────────────────────────
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
