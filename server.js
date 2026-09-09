@@ -99,7 +99,7 @@ app.post("/graph", async (req, res) => {
   const {
     action, tenantId, clientId, clientSecret,
     domain, userId, accessToken, cfToken,
-    firstName, lastName, password, upn,
+    firstName, lastName, password, upn, displayName,
     usageLocation, skuId, records,
   } = req.body || {};
 
@@ -273,15 +273,27 @@ app.post("/graph", async (req, res) => {
 
     // ── Create user ─────────────────────────────────────────────────────
     if (action === "createUser") {
-      const displayName = `${firstName} ${lastName}`;
-      const userPrincipalName = upn || `${firstName.toLowerCase()}.${lastName.toLowerCase()}@${domain}`;
+      // UPN is provided directly (full email). displayName provided directly.
+      const userPrincipalName =
+        upn || `${firstName.toLowerCase()}.${lastName.toLowerCase()}@${domain}`;
+
+      // Derive display/given/surname
+      const dName = (displayName || `${firstName || ""} ${lastName || ""}`).trim();
+      const nameParts = dName.split(/\s+/).filter(Boolean);
+      const given = firstName || nameParts[0] || dName;
+      const sur = lastName || (nameParts.length > 1 ? nameParts.slice(1).join(" ") : "");
+
+      // mailNickname must be unique-ish and alphanumeric — use UPN local part
+      const localPart = userPrincipalName.split("@")[0];
+      const mailNickname = localPart.replace(/[^a-zA-Z0-9._-]/g, "") || "user";
+
       await graph(accessToken, "POST", "/users", {
         accountEnabled: true,
-        displayName,
-        givenName: firstName,
-        surname: lastName,
+        displayName: dName || localPart,
+        givenName: given || undefined,
+        surname: sur || undefined,
         userPrincipalName,
-        mailNickname: firstName.toLowerCase(),
+        mailNickname,
         passwordProfile: { password, forceChangePasswordNextSignIn: false },
         usageLocation: usageLocation || "US",
       });
