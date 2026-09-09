@@ -86,12 +86,32 @@ async function cfRequest(cfToken, method, urlPath, body) {
 }
 
 async function getCFZoneId(cfToken, domain) {
-  // Try exact match first, then apex
-  const parts = domain.split(".");
-  const apex = parts.slice(-2).join(".");
-  const res = await cfRequest(cfToken, "GET", `/zones?name=${apex}&status=active`);
+  domain = domain.toLowerCase().trim();
+
+  // 1) Try the exact domain first — Cloudflare zone is usually the registered domain
+  let res = await cfRequest(cfToken, "GET", `/zones?name=${domain}`);
   if (res.result && res.result.length > 0) return res.result[0].id;
-  throw new Error(`No Cloudflare zone found for "${domain}" (apex: ${apex})`);
+
+  // 2) Walk the domain labels from most-specific to least, so multi-part
+  //    TLDs like "shiredebtltd.co.uk" are matched correctly (slicing the
+  //    last 2 labels would wrongly give "co.uk").
+  const labels = domain.split(".");
+  for (let i = 1; i < labels.length - 1; i++) {
+    const candidate = labels.slice(i).join(".");
+    res = await cfRequest(cfToken, "GET", `/zones?name=${candidate}`);
+    if (res.result && res.result.length > 0) return res.result[0].id;
+  }
+
+  // 3) Last resort — list all zones and find one the domain ends with
+  const all = await cfRequest(cfToken, "GET", `/zones?per_page=50`);
+  const match = (all.result || []).find(
+    (z) => domain === z.name || domain.endsWith(`.${z.name}`)
+  );
+  if (match) return match.id;
+
+  throw new Error(
+    `No Cloudflare zone found for "${domain}". Make sure this domain (or its registered root) is added to your Cloudflare account.`
+  );
 }
 
 // ── Main route ─────────────────────────────────────────────────────────────
@@ -168,6 +188,20 @@ app.post("/graph", async (req, res) => {
       const failed = [];
       let dkimPushed = false;
 
+      // Normalize a Microsoft DNS label into a Cloudflare record name.
+      // Microsoft returns the FULL host (e.g. "shiredebtltd.co.uk" for apex,
+      // "autodiscover.shiredebtltd.co.uk" for subdomains). Cloudflare treats
+      // a bare name as relative to the zone and auto-appends the zone, so we
+      // strip the zone suffix and map the apex to "@".
+      const normalizeName = (label) => {
+        if (!label) return "@";
+        let n = label.toLowerCase().trim().replace(/\.$/, "");
+        const suffix = `.${domain.toLowerCase()}`;
+        if (n === domain.toLowerCase()) return "@";
+        if (n.endsWith(suffix)) n = n.slice(0, -suffix.length);
+        return n || "@";
+      };
+
       for (const rec of (records || [])) {
         try {
           // Normalize the @odata.type to a simple lowercase key
@@ -180,7 +214,7 @@ app.post("/graph", async (req, res) => {
             if (!content) continue;
             cfRec = {
               type: "TXT",
-              name: rec.label || "@",
+              name: normalizeName(rec.label),
               content,
               ttl: 3600,
             };
@@ -189,7 +223,7 @@ app.post("/graph", async (req, res) => {
           } else if (odataType.includes("mx") || rec.mailExchange) {
             cfRec = {
               type: "MX",
-              name: rec.label || "@",
+              name: normalizeName(rec.label),
               content: rec.mailExchange,
               priority: rec.preference || 10,
               ttl: 3600,
@@ -198,22 +232,9 @@ app.post("/graph", async (req, res) => {
           // ── CNAME — covers DKIM (selector1._domainkey, selector2._domainkey)
           //           and autodiscover, msoid, sip, lyncdiscover, etc. ────
           } else if (odataType.includes("cname") || rec.canonicalName) {
-            let name = rec.label || rec.name;
+            const name = normalizeName(rec.label || rec.name);
             const content = rec.canonicalName || rec.value;
-            if (!name || !content) continue;
-
-            // Normalize the host label. Microsoft sometimes returns the full
-            // FQDN (e.g. "selector1._domainkey.mydomain.com") and sometimes
-            // just the subdomain ("selector1._domainkey"). Cloudflare's API
-            // treats a bare label as relative to the zone, so if we leave the
-            // domain suffix on, Cloudflare double-appends it. Strip the zone
-            // suffix so DKIM selectors publish as "selector1._domainkey".
-            const suffix = `.${domain}`;
-            if (name.toLowerCase().endsWith(suffix.toLowerCase())) {
-              name = name.slice(0, -suffix.length);
-            }
-            // If label IS the apex domain itself, use "@"
-            if (name.toLowerCase() === domain.toLowerCase()) name = "@";
+            if (!content) continue;
 
             const isDkim = name.toLowerCase().includes("_domainkey");
             cfRec = {
@@ -229,7 +250,7 @@ app.post("/graph", async (req, res) => {
           } else if (odataType.includes("srv") || rec.target) {
             cfRec = {
               type: "SRV",
-              name: rec.label || "@",
+              name: normalizeName(rec.label),
               data: {
                 service: rec.nameTarget?.split(".")[0] || rec.label?.split(".")[0] || "_sip",
                 proto: rec.label?.includes("tls") ? "_tls" : "_tcp",
@@ -261,7 +282,7 @@ app.post("/graph", async (req, res) => {
           failed.push(`${rec.label||'?'}: ${e.message}`);
         }
       }
-      return res.json({ ok: true, pushed, failed, dkimPushed, total: (records||[]).length });
+      return res.json({ ok: true, zoneId, pushed, failed, dkimPushed, total: (records||[]).length });
     }
 
     // ── Test Cloudflare connection ──────────────────────────────────────
