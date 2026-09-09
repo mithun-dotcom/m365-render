@@ -120,10 +120,29 @@ app.post("/graph", async (req, res) => {
 
     // ── Get DNS verification records from Microsoft ──────────────────────
     if (action === "getDnsRecords") {
-      const data = await graph(accessToken, "GET", `/domains/${domain}/verificationDnsRecords`);
+      // verificationDnsRecords = TXT/CNAME needed to prove domain ownership
+      const verifyData = await graph(accessToken, "GET", `/domains/${domain}/verificationDnsRecords`);
+      // serviceConfigurationRecords = MX, CNAME (autodiscover, DKIM selectors), TXT (SPF), SRV
       const serviceData = await graph(accessToken, "GET", `/domains/${domain}/serviceConfigurationRecords`);
-      const all = [...(data.value || []), ...(serviceData.value || [])];
-      return res.json({ records: all });
+
+      const all = [
+        ...(verifyData.value || []),
+        ...(serviceData.value || []),
+      ];
+
+      // Deduplicate by label+type combo
+      const seen = new Set();
+      const unique = all.filter(r => {
+        const key = `${r["@odata.type"]}|${r.label}|${r.canonicalName||r.text||r.mailExchange||""}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      console.log(`[getDnsRecords] ${domain} — ${unique.length} records:`,
+        unique.map(r => `${r["@odata.type"]?.split(".").pop()} ${r.label}`));
+
+      return res.json({ records: unique });
     }
 
     // ── Verify domain ───────────────────────────────────────────────────
@@ -142,32 +161,102 @@ app.post("/graph", async (req, res) => {
       const zoneId = await getCFZoneId(cfToken, domain);
       const pushed = [];
       const failed = [];
+      let dkimPushed = false;
 
       for (const rec of (records || [])) {
         try {
-          // Map MS Graph record types to Cloudflare format
-          let type = rec["@odata.type"]?.split(".").pop() || rec.recordType;
+          // Normalize the @odata.type to a simple lowercase key
+          const odataType = (rec["@odata.type"] || "").toLowerCase();
           let cfRec = null;
 
-          if (type === "txtRecord" || rec.text) {
-            cfRec = { type: "TXT", name: rec.label || "@", content: rec.text || rec.supportsTxt, ttl: 3600 };
-          } else if (type === "mxRecord" || rec.mailExchange) {
-            cfRec = { type: "MX", name: rec.label || "@", content: rec.mailExchange, priority: rec.preference || 10, ttl: 3600 };
-          } else if (type === "cnameRecord" || rec.canonicalName) {
-            cfRec = { type: "CNAME", name: rec.label, content: rec.canonicalName, ttl: 3600, proxied: false };
+          // ── TXT (SPF, DMARC, domain verification) ──────────────────────
+          if (odataType.includes("txt") || rec.text || rec.supportsTxt) {
+            const content = rec.text || rec.supportsTxt || "";
+            if (!content) continue;
+            cfRec = {
+              type: "TXT",
+              name: rec.label || "@",
+              content,
+              ttl: 3600,
+            };
+
+          // ── MX ──────────────────────────────────────────────────────────
+          } else if (odataType.includes("mx") || rec.mailExchange) {
+            cfRec = {
+              type: "MX",
+              name: rec.label || "@",
+              content: rec.mailExchange,
+              priority: rec.preference || 10,
+              ttl: 3600,
+            };
+
+          // ── CNAME — covers DKIM (selector1._domainkey, selector2._domainkey)
+          //           and autodiscover, msoid, sip, lyncdiscover, etc. ────
+          } else if (odataType.includes("cname") || rec.canonicalName) {
+            let name = rec.label || rec.name;
+            const content = rec.canonicalName || rec.value;
+            if (!name || !content) continue;
+
+            // Normalize the host label. Microsoft sometimes returns the full
+            // FQDN (e.g. "selector1._domainkey.mydomain.com") and sometimes
+            // just the subdomain ("selector1._domainkey"). Cloudflare's API
+            // treats a bare label as relative to the zone, so if we leave the
+            // domain suffix on, Cloudflare double-appends it. Strip the zone
+            // suffix so DKIM selectors publish as "selector1._domainkey".
+            const suffix = `.${domain}`;
+            if (name.toLowerCase().endsWith(suffix.toLowerCase())) {
+              name = name.slice(0, -suffix.length);
+            }
+            // If label IS the apex domain itself, use "@"
+            if (name.toLowerCase() === domain.toLowerCase()) name = "@";
+
+            const isDkim = name.toLowerCase().includes("_domainkey");
+            cfRec = {
+              type: "CNAME",
+              name,          // e.g. "selector1._domainkey" or "autodiscover"
+              content,       // e.g. "selector1-domain-com._domainkey.tenant.onmicrosoft.com"
+              ttl: 3600,
+              proxied: false, // MUST be false — DKIM/autodiscover CNAMEs can't be proxied
+            };
+            if (isDkim) dkimPushed = true;
+
+          // ── SRV (Skype/Teams) ────────────────────────────────────────────
+          } else if (odataType.includes("srv") || rec.target) {
+            cfRec = {
+              type: "SRV",
+              name: rec.label || "@",
+              data: {
+                service: rec.nameTarget?.split(".")[0] || rec.label?.split(".")[0] || "_sip",
+                proto: rec.label?.includes("tls") ? "_tls" : "_tcp",
+                name: domain,
+                priority: rec.priority || 100,
+                weight: rec.weight || 1,
+                port: rec.port || 443,
+                target: rec.nameTarget || rec.target,
+              },
+              ttl: 3600,
+            };
+
           } else {
+            // Unknown type — skip silently
             continue;
           }
 
           await cfRequest(cfToken, "POST", `/zones/${zoneId}/dns_records`, cfRec);
-          pushed.push(cfRec.type);
+          pushed.push(`${cfRec.type}:${cfRec.name}`);
         } catch (e) {
-          // Record already exists is fine
-          if (e.message.includes("already exists")) { pushed.push("(existing)"); continue; }
-          failed.push(e.message);
+          // Already exists is fine — treat as success
+          if (
+            e.message.includes("already exists") ||
+            e.message.includes("An identical record already exists")
+          ) {
+            pushed.push("(existing)");
+            continue;
+          }
+          failed.push(`${rec.label||'?'}: ${e.message}`);
         }
       }
-      return res.json({ ok: true, pushed, failed });
+      return res.json({ ok: true, pushed, failed, dkimPushed, total: (records||[]).length });
     }
 
     // ── Test Cloudflare connection ──────────────────────────────────────
@@ -194,13 +283,60 @@ app.post("/graph", async (req, res) => {
       return res.json({ ok: true, upn: userPrincipalName });
     }
 
+    // ── Get available licenses (SKUs with free seats) ───────────────────
+    if (action === "getAvailableLicenses") {
+      const data = await graph(accessToken, "GET", "/subscribedSkus");
+      const skus = (data.value || []).map((s) => {
+        const enabled = s.prepaidUnits?.enabled || 0;   // total seats purchased
+        const consumed = s.consumedUnits || 0;          // seats used
+        const available = enabled - consumed;
+        return {
+          skuId: s.skuId,
+          skuPartNumber: s.skuPartNumber,
+          enabled,
+          consumed,
+          available,
+          capabilityStatus: s.capabilityStatus,
+        };
+      })
+      // only usable SKUs that still have a free seat
+      .filter((s) => s.available > 0 && s.capabilityStatus === "Enabled")
+      // first-come order: keep the order Microsoft returns them
+      ;
+      return res.json({ skus });
+    }
+
     // ── Assign license ──────────────────────────────────────────────────
+    // If skuId is provided, use it. Otherwise auto-pick the first SKU that
+    // still has an available seat, moving to the next once one runs out.
     if (action === "assignLicense") {
+      let chosenSku = skuId;
+      let chosenName = null;
+
+      if (!chosenSku) {
+        // Auto-select: read live seat counts and pick first with availability
+        const data = await graph(accessToken, "GET", "/subscribedSkus");
+        const usable = (data.value || [])
+          .map((s) => ({
+            skuId: s.skuId,
+            skuPartNumber: s.skuPartNumber,
+            available: (s.prepaidUnits?.enabled || 0) - (s.consumedUnits || 0),
+            capabilityStatus: s.capabilityStatus,
+          }))
+          .filter((s) => s.available > 0 && s.capabilityStatus === "Enabled");
+
+        if (!usable.length) {
+          throw new Error("No available licenses — all SKUs are fully consumed");
+        }
+        chosenSku = usable[0].skuId;          // first one with a free seat
+        chosenName = usable[0].skuPartNumber;
+      }
+
       await graph(accessToken, "POST", `/users/${upn}/assignLicense`, {
-        addLicenses: [{ skuId, disabledPlans: [] }],
+        addLicenses: [{ skuId: chosenSku, disabledPlans: [] }],
         removeLicenses: [],
       });
-      return res.json({ ok: true });
+      return res.json({ ok: true, skuId: chosenSku, skuPartNumber: chosenName });
     }
 
     // ── List users on domain ────────────────────────────────────────────
