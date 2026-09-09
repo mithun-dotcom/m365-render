@@ -164,6 +164,7 @@ tr:hover td{background:rgba(255,255,255,.02)}
     <div class="action-bar">
       <button class="btn btn-primary" onclick="showAddTenant()">+ Add Tenant</button>
       <button class="btn btn-ghost" onclick="authAllTenants()">🔐 Auth All</button>
+      <button class="btn btn-ghost" onclick="debugDns()">🔍 Debug DNS</button>
       <div class="ml-auto">
         <button class="btn btn-success" id="runBtn" onclick="startRun()" disabled>▶ Run Automation</button>
       </div>
@@ -225,7 +226,7 @@ tr:hover td{background:rgba(255,255,255,.02)}
           <div class="domain-table-wrap">
             <table id="domainTable">
               <thead><tr>
-                <th>Domain</th><th>User</th><th>Add</th><th>CF DNS</th><th>Verify</th><th>User+Lic</th><th>Status</th><th></th>
+                <th>Domain</th><th>User</th><th>Add</th><th>CF DNS</th><th>Verify</th><th>User+Lic</th><th>DKIM</th><th>Status</th><th></th>
               </tr></thead>
               <tbody id="domainTbody"></tbody>
             </table>
@@ -579,6 +580,7 @@ function renderDomains(){
       <td style="color:var(--text2);font-size:11px">${userLabel}</td>
       <td>${st('addDomain')}</td><td>${st('cloudflare')}</td>
       <td>${st('verify')}</td><td>${st('users')}</td>
+      <td>${st('dkim')}</td>
       <td>${badge}</td>
       <td><button class="btn btn-ghost btn-sm" onclick="removeDomain('${d.domain}')" ${running?'disabled':''}>✕</button></td>
     </tr>`;
@@ -608,6 +610,8 @@ async function startRun(){
   log(`Starting — ${domains.length} domain(s), ${connected.length} tenant(s)`, 'head');
 
   let ti = 0;
+  const dkimQueue = []; // domains needing DKIM pushed at the very end
+
   for(const d of domains){
     if(stopRequested) break;
     const tenant = connected[ti % connected.length]; ti++;
@@ -615,42 +619,60 @@ async function startRun(){
     d.status = 'running'; renderDomains();
     let ok = true;
 
-    // Add domain
+    // ── Add domain (retry) ──────────────────────────────────────────────
     try {
       setStep(d,'addDomain','running');
-      await post({ action:'addDomain', accessToken:tenant.token, domain:d.domain });
+      await retry('Add domain', () =>
+        post({ action:'addDomain', accessToken:tenant.token, domain:d.domain })
+      );
       setStep(d,'addDomain','ok'); log(`✓ Domain added to "${tenant.name}"`, 'ok');
     } catch(e){ setStep(d,'addDomain','fail'); log(`✗ Add domain: ${e.message}`,'err'); ok=false; }
 
-    // Cloudflare DNS
+    // ── Cloudflare DNS — push everything EXCEPT DKIM now (retry) ─────────
     if(ok && cfToken){
       try {
         setStep(d,'cloudflare','running');
-        const dns = await post({ action:'getDnsRecords', accessToken:tenant.token, domain:d.domain });
+        const dns = await retry('Fetch DNS records', () =>
+          post({ action:'getDnsRecords', accessToken:tenant.token, domain:d.domain })
+        );
         log(`Fetched ${(dns.records||[]).length} DNS records from Microsoft`, 'info');
         if(dns.breakdown) log(`  Records: ${dns.breakdown.join(', ')}`, 'info');
-        if(!dns.hasDkim) log(`  ⚠ No DKIM (_domainkey) records in Microsoft's response — DKIM keys not initialized for this domain yet`, 'warn');
-        const cf = await post({ action:'cloudflare', cfToken, domain:d.domain, records:dns.records||[] });
+
+        // Split DKIM (_domainkey) records out — those go last
+        const allRecs = dns.records || [];
+        const nonDkim = allRecs.filter(r => !((r.label||'')+(r.canonicalName||'')).toLowerCase().includes('_domainkey'));
+
+        const cf = await retry('Cloudflare push', () =>
+          post({ action:'cloudflare', cfToken, domain:d.domain, records:nonDkim })
+        );
         if(cf.error) throw new Error(cf.error);
         setStep(d,'cloudflare','ok');
-        log(`✓ Pushed ${cf.pushed?.length||0} records to Cloudflare`, 'ok');
-        if(cf.dkimPushed) log(`✓ DKIM selector CNAMEs added ✓`, 'ok');
+        log(`✓ Pushed ${cf.pushed?.length||0} records to Cloudflare (DKIM handled at end)`, 'ok');
         if(cf.failed?.length) cf.failed.forEach(f => log(`  ⚠ ${f}`, 'warn'));
+
+        // Queue DKIM for the end — re-fetched fresh so newly-enabled keys are caught
+        dkimQueue.push({ d, tenant });
       } catch(e){ setStep(d,'cloudflare','fail'); log(`✗ Cloudflare: ${e.message}`,'err'); ok=false; }
     } else if(!cfToken){ setStep(d,'cloudflare','fail'); log(`⚠ Cloudflare token not set`,'warn'); }
 
-    // Verify
+    // ── Verify (retry) ──────────────────────────────────────────────────
     if(ok){
       try {
         setStep(d,'verify','running');
         await sleep(3000);
-        const v = await post({ action:'verifyDomain', accessToken:tenant.token, domain:d.domain });
-        setStep(d,'verify', v.verified?'ok':'fail');
-        log(v.verified?'✓ Domain verified':'⚠ Not verified yet — DNS may still be propagating', v.verified?'ok':'warn');
-      } catch(e){ setStep(d,'verify','fail'); log(`✗ Verify: ${e.message}`,'err'); }
+        const v = await retry('Verify domain', async () => {
+          const r = await post({ action:'verifyDomain', accessToken:tenant.token, domain:d.domain });
+          if(!r.verified) throw new Error('not verified yet (DNS propagating)');
+          return r;
+        }, { attempts:4, delayMs:8000 });
+        setStep(d,'verify','ok'); log(`✓ Domain verified`, 'ok');
+      } catch(e){
+        setStep(d,'verify','fail');
+        log(`⚠ Domain not verified — DNS may still be propagating`, 'warn');
+      }
     }
 
-    // Create users + assign licenses (loop through all users on the domain)
+    // ── Create users + assign licenses (each user retried) ──────────────
     if(ok){
       setStep(d,'users','running');
       let anyUserOk = false;
@@ -658,21 +680,19 @@ async function startRun(){
         if(stopRequested) break;
         const pwd = u.password || d.password || document.getElementById('defaultPassword').value || genPassword();
         try {
-          await post({
-            action:'createUser', accessToken:tenant.token, domain:d.domain,
-            displayName:u.displayName, password:pwd, upn:u.upn, usageLocation:usageLoc
-          });
+          await retry(`Create ${u.upn}`, () =>
+            post({ action:'createUser', accessToken:tenant.token, domain:d.domain,
+                   displayName:u.displayName, password:pwd, upn:u.upn, usageLocation:usageLoc })
+          );
           log(`✓ User created: ${u.upn}`, 'ok');
-          u.created = true; u.finalPwd = pwd;
-          anyUserOk = true;
-          // Assign license — blank sku => backend auto-picks first available
+          u.created = true; u.finalPwd = pwd; anyUserOk = true;
           try {
-            const lic = await post({ action:'assignLicense', accessToken:tenant.token, upn:u.upn, skuId: sku || undefined });
+            const lic = await retry(`License ${u.upn}`, () =>
+              post({ action:'assignLicense', accessToken:tenant.token, upn:u.upn, skuId: sku || undefined })
+            );
             log(`  ✓ License: ${lic.skuPartNumber || lic.skuId || sku || 'assigned'}`, 'ok');
             u.license = lic.skuPartNumber || lic.skuId || sku;
-          } catch(le){
-            log(`  ⚠ License for ${u.upn}: ${le.message}`, 'warn');
-          }
+          } catch(le){ log(`  ⚠ License for ${u.upn}: ${le.message}`, 'warn'); }
           results.push({ domain:d.domain, user:u.displayName, upn:u.upn, password:pwd, license:u.license, status:'success', tenant:tenant.name });
         } catch(e){
           log(`✗ User ${u.upn}: ${e.message}`, 'err');
@@ -685,6 +705,48 @@ async function startRun(){
 
     d.status = ok?'done':'failed';
     renderDomains(); renderResults(); updateStats();
+  }
+
+  // ── DKIM PASS — runs LAST, after all domains/users are done ───────────
+  // Semi-automated: for any domain where you've enabled DKIM keys (Defender
+  // or New-DkimSigningConfig), the selector CNAMEs now exist and get pushed.
+  // Domains without DKIM enabled are cleanly skipped with a note.
+  if(cfToken && dkimQueue.length && !stopRequested){
+    log(`════════ DKIM PASS (${dkimQueue.length} domain(s)) ════════`, 'head');
+    log(`Checking for DKIM keys… (enable them in Defender first if you haven't)`, 'info');
+
+    for(const item of dkimQueue){
+      if(stopRequested) break;
+      const { d, tenant } = item;
+      setStep(d,'dkim','running');
+      try {
+        // First check if DKIM records exist at all — one quick fetch
+        const dns = await post({ action:'getDnsRecords', accessToken:tenant.token, domain:d.domain });
+        const dkimRecs = (dns.records||[]).filter(r =>
+          ((r.label||'')+(r.canonicalName||'')).toLowerCase().includes('_domainkey'));
+
+        if(!dkimRecs.length){
+          // Not enabled for this domain — skip, don't hammer with retries
+          setStep(d,'dkim','fail');
+          log(`⊘ DKIM skipped for ${d.domain} — keys not enabled in the tenant yet`, 'warn');
+          renderDomains();
+          continue;
+        }
+
+        // DKIM keys exist — push them, with retry for transient CF errors
+        const cf = await retry(`DKIM ${d.domain}`, async () => {
+          const r = await post({ action:'cloudflare', cfToken, domain:d.domain, records:dkimRecs });
+          if(r.error) throw new Error(r.error);
+          return r;
+        }, { attempts:3, delayMs:6000 });
+        setStep(d,'dkim','ok');
+        log(`✓ DKIM CNAMEs added for ${d.domain} (${dkimRecs.length} record(s))`, 'ok');
+      } catch(e){
+        setStep(d,'dkim','fail');
+        log(`✗ DKIM for ${d.domain}: ${e.message}`, 'err');
+      }
+      renderDomains();
+    }
   }
 
   running = false;
@@ -797,6 +859,54 @@ function clearLog(){
 }
 function genPassword(){ const c='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$'; let p=''; for(let i=0;i<14;i++) p+=c[Math.floor(Math.random()*c.length)]; return p; }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+// Retry a step with backoff. fn should throw on failure and return on success.
+// label is for logging. attempts = how many total tries. delayMs grows each time.
+async function retry(label, fn, { attempts=3, delayMs=4000, quiet=false } = {}){
+  let lastErr;
+  for(let i=1; i<=attempts; i++){
+    if(stopRequested) throw new Error('stopped');
+    try {
+      return await fn(i);
+    } catch(e){
+      lastErr = e;
+      if(i < attempts){
+        if(!quiet) log(`  ↻ ${label} failed (try ${i}/${attempts}) — retrying in ${Math.round(delayMs/1000)}s: ${e.message}`, 'warn');
+        await sleep(delayMs);
+        delayMs = Math.round(delayMs * 1.5); // backoff
+      }
+    }
+  }
+  throw lastErr;
+}
+
+// ── DEBUG: dump raw Microsoft DNS records ──────────────────────────────────
+async function debugDns(){
+  const connected = tenants.filter(t=>t.status==='connected');
+  if(!connected.length){ alert('Authenticate a tenant first'); return; }
+  if(!domains.length){ alert('Add at least one domain first'); return; }
+  const d = domains[0];
+  const tenant = connected[0];
+  log(`════════ DEBUG DNS: ${d.domain} ════════`, 'head');
+  try {
+    const dump = await post({ action:'dumpDns', accessToken:tenant.token, domain:d.domain });
+    const svc = dump.serviceConfigurationRecords || [];
+    log(`serviceConfigurationRecords: ${Array.isArray(svc)?svc.length:'ERROR'} records`, 'info');
+    (Array.isArray(svc)?svc:[]).forEach(r => {
+      const type = (r['@odata.type']||'').split('.').pop();
+      const val = r.canonicalName || r.text || r.mailExchange || r.nameTarget || '';
+      const isDkim = ((r.label||'')+(r.canonicalName||'')).toLowerCase().includes('_domainkey');
+      log(`  ${isDkim?'🔑 ':''}${type} | label="${r.label}" | value="${val}"`, isDkim?'ok':'info');
+    });
+    const verify = dump.verificationDnsRecords || [];
+    log(`verificationDnsRecords: ${Array.isArray(verify)?verify.length:'ERROR'} records`, 'info');
+    const anyDkim = (Array.isArray(svc)?svc:[]).some(r => ((r.label||'')+(r.canonicalName||'')).toLowerCase().includes('_domainkey'));
+    if(anyDkim) log(`✓ DKIM records ARE present in Microsoft's response`, 'ok');
+    else log(`✗ NO DKIM records in Microsoft's response — DKIM not initialized in the tenant for this domain`, 'err');
+  } catch(e){
+    log(`✗ Debug failed: ${e.message}`, 'err');
+  }
+}
 
 // ── PING / WAKE SERVER ─────────────────────────────────────────────────────
 async function pingServer(){
